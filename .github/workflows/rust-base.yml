@@ -1,0 +1,223 @@
+name: 'Rust Base CI'
+on:
+  workflow_call:
+    inputs:
+      rust-channel:
+        description: 'Rust channel to use (stable, beta, nightly, or specific version like 1.70.0)'
+        required: false
+        default: 'stable'
+        type: string
+      install-foundry:
+        description: 'Installs foundry as a pre-test step'
+        required: false
+        default: false
+        type: boolean
+      require-lockfile:
+        description: 'Require a Cargo.lock file to be present (--locked)'
+        required: false
+        default: false
+        type: boolean
+      requires-private-deps:
+        description: 'Requires private dependencies to be fetched, sets up ssh-agent'
+        required: false
+        default: false
+        type: boolean
+      rust-profile:
+        description: 'The profile to give to cargo for running, defaults to dev'
+        required: false
+        default: 'dev'
+        type: string
+      dind:
+        description: 'Use a DIND runner'
+        required: false
+        default: false
+        type: boolean
+      submodules:
+        description: 'Updates git submodules recursively'
+        required: false
+        default: false
+        type: boolean
+      feature-sets:
+        description: 'JSON array of feature flag strings for cargo test, clippy, and docs (e.g., "", "--all-features")'
+        required: false
+        default: '[""]'
+        type: string
+      foundry-command:
+        description: 'Shell command to run after installing Foundry (e.g., "forge build --root contracts"). Does nothing if empty.'
+        required: false
+        default: ''
+        type: string
+      runner:
+        description: 'Runner to use (e.g. big-bois-x86 for custom group runner, ubuntu-latest or macos-latest for GitHub runners)'
+        required: false
+        default: ''
+        type: string
+      install-dapp-dependencies:
+        description: 'Whether to install dapp dependencies'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      SSH_PRIVATE_KEY:
+        description: 'SSH private key for fetching private dependencies'
+        required: false
+
+jobs:
+  test:
+    name: Nextest (${{ inputs.rust-channel }})
+    runs-on: ${{ inputs.runner != '' && (contains(inputs.runner, '-latest') && inputs.runner || format('group:{0}', inputs.runner)) || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        feature-set: ${{ fromJSON(inputs.feature-sets) }}
+    services:
+      docker:
+        image: ${{ inputs.dind && 'docker:dind' || '' }}
+        options: ${{ inputs.dind && '--privileged --shm-size=2g' || '--name noop' }}
+        volumes: ${{ inputs.dind && fromJSON('["/var/run/docker.sock:/var/run/docker.sock:ro"]') || fromJSON('[]') }}
+    steps:
+      - name: Setup ssh-agent
+        if: ${{ inputs.requires-private-deps == true }}
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: |
+            ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Configure Git for SSH
+        if: ${{ inputs.requires-private-deps == true }}
+        run: |
+          git config --global --unset-all url.https://github.com/.insteadOf || echo "No HTTPS config to unset"
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+      - name: Install submodules
+        if: ${{ inputs.submodules == true }}
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        if: ${{ inputs.install-dapp-dependencies }}
+        with:
+          version: 8
+          run_install: false
+      - name: Install dapp dependencies
+        if: ${{ inputs.install-dapp-dependencies }}
+        run: |
+          pnpm install -g next
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-channel }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.rust-channel }}-test-${{ inputs.require-lockfile }}-${{ matrix.feature-set }}
+      - uses: taiki-e/install-action@nextest
+      - name: Optional Foundry Install
+        if: ${{ inputs.install-foundry == true }}
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - name: Run Foundry Command
+        if: ${{ inputs.install-foundry == true && inputs.foundry-command != '' }}
+        run: ${{ inputs.foundry-command }}
+      - name: Run tests (${{ matrix.feature-set || 'default' }})
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+        run: |
+          cargo nextest run --workspace ${{ inputs.require-lockfile == true && '--locked' || '' }} ${{ matrix.feature-set }} --cargo-profile ${{ inputs.rust-profile }} --no-tests=warn
+
+  rustfmt:
+    name: Format (${{ inputs.rust-channel }})
+    runs-on: ${{ inputs.runner != '' && (contains(inputs.runner, '-latest') && inputs.runner || format('group:{0}', inputs.runner)) || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-channel }}
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.rust-channel }}-fmt
+      - name: Check formatting
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy (${{ inputs.rust-channel }})
+    runs-on: ${{ inputs.runner != '' && (contains(inputs.runner, '-latest') && inputs.runner || format('group:{0}', inputs.runner)) || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        feature-set: ${{ fromJSON(inputs.feature-sets) }}
+    steps:
+      - name: Setup ssh-agent
+        if: ${{ inputs.requires-private-deps == true }}
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: |
+            ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-channel }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.rust-channel }}-clippy-${{ inputs.require-lockfile }}-${{ matrix.feature-set }}
+      - name: Clippy check (${{ matrix.feature-set || 'default' }})
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+        run: |
+          cargo clippy --all-targets --workspace ${{ inputs.require-lockfile == true && '--locked' || '' }} ${{ matrix.feature-set }} --profile ${{ inputs.rust-profile }} -- -D warnings
+
+  docs:
+    name: Docs (${{ inputs.rust-channel }})
+    runs-on: ${{ inputs.runner != '' && (contains(inputs.runner, '-latest') && inputs.runner || format('group:{0}', inputs.runner)) || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        feature-set: ${{ fromJSON(inputs.feature-sets) }}
+    steps:
+      - name: Setup ssh-agent
+        if: ${{ inputs.requires-private-deps == true }}
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: |
+            ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-channel }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ inputs.rust-channel }}-docs-${{ inputs.require-lockfile }}-${{ matrix.feature-set }}
+      - name: Check documentation (${{ matrix.feature-set || 'default' }})
+        env:
+          RUSTDOCFLAGS: -D warnings
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+        run: |
+          cargo doc --no-deps --document-private-items --workspace --examples ${{ inputs.require-lockfile == true && '--locked' || '' }} ${{ matrix.feature-set }} --profile ${{ inputs.rust-profile }}
+
+  audit:
+    name: Cargo Audit (${{ inputs.rust-channel }})
+    runs-on: ${{ inputs.runner != '' && (contains(inputs.runner, '-latest') && inputs.runner || format('group:{0}', inputs.runner)) || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-channel }}
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      - name: Run cargo audit
+        run: cargo audit

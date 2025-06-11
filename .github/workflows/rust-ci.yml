@@ -10,8 +10,7 @@ env:
 
 jobs:
   rust-base:
-    uses: phylaxsystems/actions/.github/workflows/rust-base.yaml@main
+    uses: ./.github/workflows/rust-base.yml
     with:
       rust-channel: 'nightly'
       dind: true
-  
