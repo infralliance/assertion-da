@@ -222,6 +222,5 @@ jobs:
       - name: Run cargo audit
         id: cargo-audit
         run: |
-          cargo audit --json > audit-report.json || true
-          cat audit-report.json
+          cargo audit || true
 
